@@ -19,9 +19,136 @@ import sym
 FUNCTIONS THAT YOU NEED TO MODIFY
 """
 
-"""
-FUNCTIONS ADDED BY SAM
-"""
+def getE(a, b, K, rng, threshold=1e-3, num_iters=1000):
+    """
+    INPUTS
+
+    -- required --
+    a is n x 2
+    b is n x 2
+    K is 3 x 3
+    rng is a random number generator
+
+    -- optional --
+    threshold is the max error (e.g., epipolar or sampson) for inliers
+    num_iters is the number of RANSAC iterations
+
+    OUTPUTS
+
+    E is 3 x 3
+    num_inliers is a scalar
+    mask is length n (truthy value for each match that is an inlier, falsy otherwise)
+    """
+
+    ### NORMALIZE ###
+    alpha = np.zeros([len(a), 3])
+    for i in np.arange(0, len(a), 1):
+        alpha[i,] = np.linalg.inv(K) @ np.append(a[i,], 1)
+    beta = np.zeros([len(b), 3])
+    for i in np.arange(0, len(b), 1):
+        beta[i,] = np.linalg.inv(K) @ np.append(b[i,], 1)
+
+    ### FIND COMPONENTS OF E ###
+    inliers = 0
+    mask = False
+    U = 0
+    S = 0
+    V = 0
+    for n in np.arange(0, num_iters, 1):
+        sample = rng.integers(low=0, high=len(alpha), size=8)
+        alpha_8 = alpha[sample, :]
+        beta_8 = beta[sample, :]
+
+        #myprint(alpha_8)
+        #myprint(alpha_8)
+
+        U_i, S_i, V_i = getUSV(alpha_8, beta_8)
+        dA_alpha, dA_beta = get_dA(alpha, beta, U_i @ S_i @ V_i.T)
+        mask_i = (dA_alpha < threshold) & (dA_beta < threshold)
+        inliers_i = np.sum(mask_i)
+
+        if inliers_i > inliers:
+            inliers = inliers_i
+            mask = mask_i
+            U = U_i
+            S = S_i
+            V = V_i
+
+    E = U @ S @ V.T
+
+    return E, inliers, mask
+
+def decomposeE(a, b, K, E):
+    """
+    INPUTS
+
+    -- required --
+    a is n x 2
+    b is n x 2
+    K is 3 x 3
+    E is 3 x 3
+
+    OUTPUTS
+
+    R_inB_ofA is 3 x 3
+    p_inB_ofA is length 3
+    p_inA is n x 3
+    """
+
+    alpha = np.zeros([len(a), 3])
+    for i in np.arange(0, len(a), 1):
+        alpha[i,] = np.linalg.inv(K) @ np.append(a[i,], 1)
+    beta = np.zeros([len(b), 3])
+    for i in np.arange(0, len(b), 1):
+        beta[i,] = np.linalg.inv(K) @ np.append(b[i,], 1)
+
+    U, S, V_T = np.linalg.svd(E)
+    V = V_T.T
+
+    W = np.array([[0, -1, 0],
+                  [1, 0, 0],
+                  [0, 0, 1]])
+
+    max_mask = 0
+
+    # option 1
+    R_inB_ofA_i = U @ W.T @ V.T
+    p_inB_ofA_i = U[:,-1]
+    p_inA_i, p_inB_i, mask = twoview_triangulate(alpha, beta, R_inB_ofA_i, p_inB_ofA_i)
+    if (sum(mask) > max_mask):
+        R_inB_ofA = R_inB_ofA_i
+        p_inB_ofA = p_inB_ofA_i
+        p_inA = p_inA_i
+
+    # option 2
+    R_inB_ofA_i = U @ W @ V.T
+    p_inB_ofA_i = -U[:,-1]
+    p_inA_i, p_inB_i, mask = twoview_triangulate(alpha, beta, R_inB_ofA_i, p_inB_ofA_i)
+    if (sum(mask) > max_mask):
+        R_inB_ofA = R_inB_ofA_i
+        p_inB_ofA = p_inB_ofA_i
+        p_inA = p_inA_i
+
+    # option 3 (Negative)
+    R_inB_ofA_i = U @ W.T @ V.T
+    p_inB_ofA_i = -U[:,-1]
+    p_inA_i, p_inB_i, mask = twoview_triangulate(alpha, beta, R_inB_ofA_i, p_inB_ofA_i)
+    if (sum(mask) > max_mask):
+        R_inB_ofA = R_inB_ofA_i
+        p_inB_ofA = p_inB_ofA_i
+        p_inA = p_inA_i
+
+    # option 4 (Negative)
+    R_inB_ofA_i = U @ W @ V.T
+    p_inB_ofA_i = U[:,-1]
+    p_inA_i, p_inB_i, mask = twoview_triangulate(alpha, beta, R_inB_ofA_i, p_inB_ofA_i)
+    if (sum(mask) > max_mask):
+        R_inB_ofA = R_inB_ofA_i
+        p_inB_ofA = p_inB_ofA_i
+        p_inA = p_inA_i
+
+    return R_inB_ofA, p_inB_ofA, p_inA
+
 def skew(v):
     assert(type(v) == np.ndarray)
     assert(v.shape == (3,))
@@ -42,6 +169,17 @@ def twoview_triangulate(alpha, beta, R_inB_ofA, p_inB_ofA):
     #  mask         1d array of length equal to number of triangulated points,
     #               with a "1" for each point that has positive depth in both
     #               frames and with a "0" otherwise
+
+    """
+    INPUTS
+    track is **one** track of matches to triangulate
+    views is the list of all views
+    K is 3 x 3
+
+    OUTPUTS
+
+    p_inA is length 3
+    """
 
     p_inA = np.zeros([len(alpha), 3])
     for i in np.arange(0, len(alpha), 1):
@@ -76,7 +214,7 @@ def get_dA(alpha, beta, E):
 def getUSV(alpha, beta):
     kronprod = np.zeros([len(alpha), 9])
     for i in np.arange(0, len(alpha), 1):
-        kronprod[i,] = np.transpose(np.kron(alpha[i,], beta[i,]))
+        kronprod[i,] = np.kron(alpha[i,], beta[i,]).T
 
     U_dp, S_dp, V_T_dp = np.linalg.svd(kronprod)
     E_dp = np.array(np.column_stack((V_T_dp[-1][0:3], V_T_dp[-1][3:6], V_T_dp[-1][6:9])))
@@ -93,158 +231,24 @@ def getUSV(alpha, beta):
 
     return U, S, V
 
-def ransac(alpha, beta, rand_gen, epsilon, samples):
-    inliers = 0
-    mask = False
-    U = 0
-    S = 0
-    V = 0
-    for n in np.arange(0, samples, 1):
-        sample = np.random.randint(len(alpha), size=8)
-        # rand_gen(len(alpha), size=8)  # could be made such that the sample cannot be identical
-        alpha_8 = alpha[sample, :]
-        beta_8 = beta[sample, :]
-
-        U_i, S_i, V_i = getUSV(alpha_8, beta_8)
-        dA_alpha, dA_beta = get_dA(alpha, beta, U_i @ S_i @ V_i.T)
-        inliers_i = np.sum((dA_alpha < epsilon) & (dA_beta < epsilon))
-
-        if inliers_i > inliers:
-            inliers = inliers_i
-            mask = (dA_alpha < epsilon) & (dA_beta < epsilon)
-            U = U_i
-            S = S_i
-            V = V_i
-
-    return U, S, V, mask, inliers
-
-"""
-Functions for two-view reconstruction.
-"""
-
-def getE(a, b, K, rng, threshold=1e-3, num_iters=1000):
-    """
-    INPUTS
-    
-    -- required --
-    a is n x 2
-    b is n x 2
-    K is 3 x 3
-    rng is a random number generator
-    
-    -- optional --
-    threshold is the max error (e.g., epipolar or sampson) for inliers
-    num_iters is the number of RANSAC iterations
-    
-    OUTPUTS
-
-    E is 3 x 3
-    num_inliers is a scalar
-    mask is length n (truthy value for each match that is an inlier, falsy otherwise)
-    """
-
-    ### NORMALIZE ###
-    alpha = np.zeros([len(a), 3])
-    for i in np.arange(0, len(a), 1):
-        alpha[i,] = np.linalg.inv(K) @ np.append(a[i,], 1)
-    beta = np.zeros([len(b), 3])
-    for i in np.arange(0, len(b), 1):
-        beta[i,] = np.linalg.inv(K) @ np.append(b[i,], 1)
-
-    ### FIND COMPONENTS OF E ###
-    U, S, V, mask, inliers = ransac(alpha, beta, rng, threshold, num_iters)
-    E = U @ S @ V.T  ### does this chance based on the checks down below?
-
-    return E, inliers, mask
-
-def decomposeE(a, b, K, E):
-    """
-    INPUTS
-    
-    -- required --
-    a is n x 2
-    b is n x 2
-    K is 3 x 3
-    E is 3 x 3
-    
-    OUTPUTS
-
-    R_inB_ofA is 3 x 3
-    p_inB_ofA is length 3
-    p_inA is n x 3
-    """
-
-    alpha = np.zeros([len(a), 3])
-    for i in np.arange(0, len(a), 1):
-        alpha[i,] = np.linalg.inv(K) @ np.append(a[i,], 1)
-    beta = np.zeros([len(b), 3])
-    for i in np.arange(0, len(b), 1):
-        beta[i,] = np.linalg.inv(K) @ np.append(b[i,], 1)
-
-    U, S, V = np.linalg.svd(E)
-
-    W = np.array([[0, -1, 0],
-                  [1, 0, 0],
-                  [0, 0, 1]])
-
-    max_mask = 0
-
-    # option 1
-    R_inB_ofA_i = U @ W.T @ V.T
-    p_inB_ofA_i = U[2]
-    p_inA_i, p_inB_i, mask = twoview_triangulate(alpha, beta, R_inB_ofA_i, p_inB_ofA_i)
-    if (sum(mask) > max_mask):
-        R_inB_ofA = R_inB_ofA_i
-        p_inB_ofA = p_inB_ofA_i
-        p_inA = p_inA_i
-
-    # option 2
-    R_inB_ofA_i = U @ W @ V.T
-    p_inB_ofA_i = -U[2]
-    p_inA_i, p_inB_i, mask = twoview_triangulate(alpha, beta, R_inB_ofA_i, p_inB_ofA_i)
-    if (sum(mask) > max_mask):
-        R_inB_ofA = R_inB_ofA_i
-        p_inB_ofA = p_inB_ofA_i
-        p_inA = p_inA_i
-
-    # option 3 (Negative)
-    R_inB_ofA_i = U @ W.T @ V.T
-    p_inB_ofA_i = -U[2]
-    p_inA_i, p_inB_i, mask = twoview_triangulate(alpha, beta, R_inB_ofA_i, p_inB_ofA_i)
-    if (sum(mask) > max_mask):
-        R_inB_ofA = R_inB_ofA_i
-        p_inB_ofA = p_inB_ofA_i
-        p_inA = p_inA_i
-
-    # option 4 (Negative)
-    R_inB_ofA_i = U @ W @ V.T
-    p_inB_ofA_i = U[2]
-    p_inA_i, p_inB_i, mask = twoview_triangulate(alpha, beta, R_inB_ofA_i, p_inB_ofA_i)
-    if (sum(mask) > max_mask):
-        R_inB_ofA = R_inB_ofA_i
-        p_inB_ofA = p_inB_ofA_i
-        p_inA = p_inA_i
-
-    return R_inB_ofA, p_inB_ofA, p_inA
-
 """
 Functions for resectioning and triangulation.
 """
 
-def resection(p_inA, c, K, rng, threshold=1., num_iters=1000):
+def resection(p_inA, c, K, rng, threshold, num_iters=1000): # Sam's version #
     """
     INPUTS
-    
+
     -- required --
     p_inA is n x 3
     c is n x 2
     K is 3 x 3
     rng is a random number generator
-    
+
     -- optional --
     threshold is the max error (e.g., reprojection) for inliers
     num_iters is the number of RANSAC iterations
-    
+
     OUTPUTS
 
     R_inC_ofA is 3 x 3
@@ -252,23 +256,98 @@ def resection(p_inA, c, K, rng, threshold=1., num_iters=1000):
     num_inliers is a scalar
     mask is length n (truthy value for each match that is an inlier, falsy otherwise)
     """
-    
-    return None, None, None, None
 
-def triangulate(track, views, K):
+    num_inliers = 0
+
+    for n in np.arange(0, num_iters, 1):
+        sample = np.random.randint(len(p_inA), size=6)
+        p_inA_6 = p_inA[sample, :]
+        c_6 = c[sample, :]
+
+        gamma = np.zeros([len(c_6), 3])
+        for i in np.arange(0, len(c_6), 1):
+            gamma[i,] = np.linalg.inv(K) @ np.append(c_6[i,], 1)
+
+        M = np.zeros([len(gamma) * 3, 12])
+        for i in np.arange(0, len(gamma), 1):
+            x = np.kron(p_inA_6[i], skew(gamma[i,]))
+
+            M[(i*3):(i*3+3),] = np.column_stack((x, skew(gamma[i,])))
+
+        U, S, V_T = np.linalg.svd(M)
+
+        V_n = V_T[-1,]
+
+        p_inC_ofA_i = V_n[-3:,]
+        R_inC_ofA_i = np.array([[V_n[0], V_n[3], V_n[6]],
+                                [V_n[1], V_n[4], V_n[7]],
+                                [V_n[2], V_n[5], V_n[8]]])
+
+        ### perform corections:
+        # Scalse
+        X_inC_ofA = np.linalg.norm(V_n[0:3])
+
+        p_inC_ofA_i = p_inC_ofA_i / X_inC_ofA
+        R_inC_ofA_i = R_inC_ofA_i / X_inC_ofA
+
+        # Right Handed
+        p_inC_ofA_i = p_inC_ofA_i * np.linalg.det(R_inC_ofA_i)
+        R_inC_ofA_i = R_inC_ofA_i * np.linalg.det(R_inC_ofA_i)
+
+        # Rotation matix
+        U, S, V_T = np.linalg.svd(R_inC_ofA_i)
+        R_inC_ofA_i = np.linalg.det(U @ V_T) * U @ V_T
+
+        mask_i = projection_error(K, R_inC_ofA_i, p_inC_ofA_i, p_inA, c, warn=False) < threshold
+        num_inliers_i = np.sum(mask_i)
+
+        if num_inliers_i > num_inliers:
+            num_inliers = num_inliers_i
+            mask = mask_i
+            R_inC_ofA = R_inC_ofA_i
+            p_inC_ofA = p_inC_ofA_i
+
+    return R_inC_ofA, p_inC_ofA, num_inliers, mask
+
+def triangulate(track, views, K): # Sam's version #
     """
     INPUTS
     track is **one** track of matches to triangulate
     views is the list of all views
     K is 3 x 3
-    
+
     OUTPUTS
 
     p_inA is length 3
     """
 
-    return None
+    B = np.zeros([len(track['matches']) * 3, 1])
+    A = np.zeros([len(track['matches']) * 3, 3])
 
+    for match in enumerate(track['matches']):
+        i = match[0]
+
+        if(i == 1):
+            continue
+
+        i_view = match[1]['view_id']
+        i_feature = match[1]['feature_id']
+
+        b = views[i_view]['pts'][i_feature]['pt2d']
+        beta = np.linalg.inv(K) @ np.append(b, 1)
+
+        R_inB_ofA = views[i_view]['R_inB_ofA']
+        p_inB_ofA = views[i_view]['p_inB_ofA']
+
+        B_i = np.hstack([-skew(beta) @ p_inB_ofA])  # add A
+        A_i = skew(beta) @ R_inB_ofA
+
+        B[(i*3):(i*3+3),0] = B_i
+        A[(i*3):(i*3+3),] = A_i
+
+    p_inA = np.linalg.pinv(A) @ B
+
+    return p_inA
 
 """
 Functions for optimization
@@ -301,7 +380,7 @@ def get_optimizer(views, tracks, K):
             continue
         
         initial_values[f'T_inB{i}_ofA'] = sym.Pose3(
-            R=view['R_inB_ofA'], #sym.Rot3.identity(),                                # <-- FIXME
+            R=sym.Rot3.from_rotation_matrix(view['R_inB_ofA']), #sym.Rot3.identity(), # <-- FIXME
             t=view['p_inB_ofA'], #np.zeros(3),                                        # <-- FIXME
         )
 
@@ -337,7 +416,7 @@ def get_optimizer(views, tracks, K):
             print(f'  track_{i_track}_p_inA has an initial value and is an optimized key')
         elif (i_track == 1):
             print('\n ...\n')
-        initial_values[f'track_{i_track}_p_inA'] = track['p_inA'] #np.zeros(3)              # <-- FIXME
+        initial_values[f'track_{i_track}_p_inA'] = track['p_inA'] #np.zeros(3)          # <-- FIXME
         optimized_keys.append(f'track_{i_track}_p_inA')
 
         for match in track['matches']:
@@ -345,7 +424,8 @@ def get_optimizer(views, tracks, K):
             feature_id = match['feature_id']
             if (i_track == 0) or (i_track == len(tracks) - 1):
                 print(f'  track_{i_track}_b_{view_id} has an initial value and an sf_projection_residual factor')
-            initial_values[f'track_{i_track}_b_{view_id}'] = match['p_inA'] #np.zeros(2)    # <-- FIXME
+            #initial_values[f'track_{i_track}_b_{view_id}'] = np.array([i_track, view_id]) #np.zeros(2) # <-- FIXME
+            initial_values[f'track_{i_track}_b_{view_id}'] = views[view_id]['pts'][feature_id]['pt2d']
             factors.append(Factor(
                 residual=sf_projection_residual,
                 keys=[
@@ -375,11 +455,6 @@ def get_optimizer(views, tracks, K):
     )
 
     return optimizer, initial_values
-
-
-
-
-
 
 """
 FUNCTIONS THAT YOU DO NOT NEED TO MODIFY
