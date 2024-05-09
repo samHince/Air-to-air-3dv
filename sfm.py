@@ -484,6 +484,110 @@ def get_optimizer2(views, tracks_tags, K):
 
     return optimizer, initial_values
 
+
+def get_optimizer_old(views, tracks, K):
+    """
+    Returns a symforce optimizer and a set of initial_values that
+    allow you to solve the bundle adjustment problem corresponding
+    to the given views and tracks.
+    """
+
+    # Create data structures
+    initial_values = Values(
+        fx=K[0, 0],  # <-- FIXME
+        fy=K[1, 1],  # <-- FIXME
+        cx=K[0, 2],  # <-- FIXME
+        cy=K[1, 2],  # <-- FIXME
+        tracks=[],
+        epsilon=sym.epsilon,
+    )
+    optimized_keys = []
+    factors = []
+
+    # For each view that has a pose estimate, add this pose estimate as an initial
+    # value and (if not the first view) as an optimized key.
+    print(f'Iterate over {len(views)} views:')
+    for i, view in enumerate(views):
+        if (view['R_inB_ofA'] is None) or (view['p_inB_ofA'] is None):
+            continue
+
+        initial_values[f'T_inB{i}_ofA'] = sym.Pose3(
+            R=sym.Rot3.from_rotation_matrix(view['R_inB_ofA']),  # sym.Rot3.identity(), # <-- FIXME
+            t=view['p_inB_ofA'],  # np.zeros(3),                                        # <-- FIXME
+        )
+
+        if i > 0:
+            optimized_keys.append(f'T_inB{i}_ofA')
+            print(f' T_inB{i}_ofA has an initial value and is an optimized key')
+        else:
+            print(f' T_inB{i}_ofA has an initial value')
+
+    # Add a factor to fix the scale (the relative distance between frames B0 and
+    # B1 will be something close to one).
+    print(f'T_inB{1}_ofA has an sf_scale_residual factor')
+    factors = [
+        Factor(
+            residual=sf_scale_residual,
+            keys=[
+                f'T_inB{1}_ofA',
+                'epsilon',
+            ],
+        )
+    ]
+
+    # For each valid track, add its 3d point as an initial value and an optimized
+    # key, and then, for each match in this track, add its 2d point as an initial
+    # value and add a factor to penalize reprojection error.
+    print(f'Iterate over {len(tracks)} tracks:')
+    for i_track, track in enumerate(tracks):
+        if not track['valid']:
+            continue
+
+        if (i_track == 0) or (i_track == len(tracks) - 1):
+            print(f' track {i_track}:')
+            print(f'  track_{i_track}_p_inA has an initial value and is an optimized key')
+        elif (i_track == 1):
+            print('\n ...\n')
+        initial_values[f'track_{i_track}_p_inA'] = track['p_inA']  # np.zeros(3)          # <-- FIXME
+        optimized_keys.append(f'track_{i_track}_p_inA')
+
+        for match in track['matches']:
+            view_id = match['view_id']
+            feature_id = match['feature_id']
+            if (i_track == 0) or (i_track == len(tracks) - 1):
+                print(f'  track_{i_track}_b_{view_id} has an initial value and an sf_projection_residual factor')
+            # initial_values[f'track_{i_track}_b_{view_id}'] = np.array([i_track, view_id]) #np.zeros(2) # <-- FIXME
+            initial_values[f'track_{i_track}_b_{view_id}'] = views[view_id]['pts'][feature_id]['pt2d']
+            factors.append(Factor(
+                residual=sf_projection_residual,
+                keys=[
+                    f'T_inB{view_id}_ofA',
+                    f'track_{i_track}_p_inA',
+                    f'track_{i_track}_b_{view_id}',
+                    'fx',
+                    'fy',
+                    'cx',
+                    'cy',
+                    'epsilon',
+                ],
+            ))
+
+    # Create optimizer
+    optimizer = Optimizer(
+        factors=factors,
+        optimized_keys=optimized_keys,
+        debug_stats=True,
+        params=Optimizer.Params(
+            iterations=100,
+            use_diagonal_damping=True,
+            lambda_down_factor=0.1,
+            lambda_up_factor=5.,
+            early_exit_min_reduction=1e-4,
+        ),
+    )
+
+    return optimizer, initial_values
+
 def get_optimizer(views, tracks, K):
     """
     Returns a symforce optimizer and a set of initial_values that
@@ -553,10 +657,14 @@ def get_optimizer(views, tracks, K):
         for match in track['matches']:
             view_id = match['view_id']
             feature_id = match['feature_id']
+
+            desc = str(track['matches'][view_id]['feature_id'])
+            index = int(np.where(np.array(views[track["matches"][view_id]["view_id"]]["desc"]) == desc)[0][0])
+
             if (i_track == 0) or (i_track == len(tracks) - 1):
                 print(f'  track_{i_track}_b_{view_id} has an initial value and an sf_projection_residual factor')
             #initial_values[f'track_{i_track}_b_{view_id}'] = np.array([i_track, view_id]) #np.zeros(2) # <-- FIXME
-            initial_values[f'track_{i_track}_b_{view_id}'] = views[view_id]['pts'][feature_id]['pt2d']
+            initial_values[f'track_{i_track}_b_{view_id}'] = views[view_id]['pts'][index]['pt2d']
             factors.append(Factor(
                 residual=sf_projection_residual,
                 keys=[
@@ -688,14 +796,22 @@ def show_results(views, tracks, K, show_pose_estimates=True, show_reprojection_e
         for match in track['matches']:
             view_id = match['view_id']
             feature_id = match['feature_id']
+
             view = views[view_id]
+
+            desc = str(track['matches'][view_id]['feature_id'])
+            index = int(np.where(np.array(views[track["matches"][view_id]["view_id"]]["desc"]) == desc)[0][0])
+
+            #print(index)
+            #print(type(feature_id), feature_id)
+
             e[view_id].append(
                 projection_error(
                     K,
                     view['R_inB_ofA'],
                     view['p_inB_ofA'],
                     track['p_inA'],
-                    view['pts'][feature_id]['pt2d'],
+                    view['pts'][index]['pt2d'],
                 )
             )
     
@@ -820,6 +936,87 @@ def show_results2(views, tracks_tags, K, show_pose_estimates=True, show_reprojec
             ax.legend()
             ax.grid()
         plt.show()
+
+
+def show_results_old(views, tracks, K, show_pose_estimates=True, show_reprojection_errors=True):
+    """
+    Show the pose estimates (text) and reprojection errors (both text and plots)
+    corresponding to views and tracks.
+    """
+
+    # Pose estimates
+    if show_pose_estimates:
+        print('POSE ESTIMATES')
+        for i_view, view in enumerate(views):
+            if (view['R_inB_ofA'] is None) or (view['p_inB_ofA'] is None):
+                continue
+
+            R_inA_ofB = view['R_inB_ofA'].T
+            p_inA_ofB = - view['R_inB_ofA'].T @ view['p_inB_ofA']
+            s = f' [R_inA_ofB{i_view}, p_inA_ofB{i_view}] = '
+            s += np.array2string(
+                np.column_stack([R_inA_ofB, p_inA_ofB]),
+                formatter={'float': lambda x: f'{x:10.4f}'},
+                prefix=s,
+            )
+            print(s)
+
+    # Get reprojection errors
+    e = [[] for view in views]
+    for track in tracks:
+        if not track['valid']:
+            continue
+
+        for match in track['matches']:
+            view_id = match['view_id']
+            feature_id = match['feature_id']
+            view = views[view_id]
+            e[view_id].append(
+                projection_error(
+                    K,
+                    view['R_inB_ofA'],
+                    view['p_inB_ofA'],
+                    track['p_inA'],
+                    view['pts'][feature_id]['pt2d'],
+                )
+            )
+
+    # Show reprojection errors
+    if show_reprojection_errors:
+        print('\nREPROJECTION ERRORS')
+
+        # Text
+        for i_view, (e_i, view) in enumerate(zip(e, views)):
+            if len(e_i) == 0:
+                assert ((view['R_inB_ofA'] is None) or (view['p_inB_ofA'] is None))
+                continue
+
+            assert (not ((view['R_inB_ofA'] is None) or (view['p_inB_ofA'] is None)))
+            print(f' Image {i_view:2d} ({len(e_i):5d} points) : (mean, std, max, min) =' + \
+                  f' ({np.mean(e_i):6.2f}, {np.std(e_i):6.2f}, {np.max(e_i):6.2f}, {np.min(e_i):6.2f})')
+
+        # Figure
+        bins = np.linspace(0, 5, 50)
+        counts = [len(e_i) for e_i in e if len(e_i) > 0]
+        max_count = np.max(counts)
+        num_views = len(counts)
+        num_cols = 3
+        num_rows = (num_views // num_cols) + 1
+        fig = plt.figure(figsize=(num_cols * 4, num_rows * 2), tight_layout=True)
+        index = 0
+        for i_view, e_i in enumerate(e):
+            if len(e_i) == 0:
+                continue
+
+            index += 1
+            ax = fig.add_subplot(num_rows, num_cols, index)
+            ax.hist(e_i, bins, label=f'Image {i_view}')
+            ax.set_xlim([bins[0], bins[-1]])
+            ax.set_ylim([0, max_count])
+            ax.legend()
+            ax.grid()
+        plt.show()
+
 
 def is_duplicate_match(mA, matches):
     """
@@ -1129,6 +1326,65 @@ def store_results2(views, tracks_tags, K, result, max_reprojection_err=1.):
     print(f'{num_invalid_old:6d} already invalid tracks')
     print(f'{num_invalid_new:6d} newly invalid tracks')
 
+
+def store_results_old(views, tracks, K, result, max_reprojection_err=1.):
+    """
+    Updates views and tracks given the result from optimization.
+    """
+
+    # Get pose estimates
+    num_views = 0
+    for i_view, view in enumerate(views):
+        if (view['R_inB_ofA'] is None) or (view['p_inB_ofA'] is None):
+            continue
+
+        T_inB_ofA = result.optimized_values[f'T_inB{i_view}_ofA'].to_homogenous_matrix()
+        R_inB_ofA = T_inB_ofA[0:3, 0:3]
+        p_inB_ofA = T_inB_ofA[0:3, 3]
+        view['R_inB_ofA'] = R_inB_ofA
+        view['p_inB_ofA'] = p_inB_ofA
+        num_views += 1
+
+    # Get position estimates
+    num_invalid_old = 0
+    num_invalid_new = 0
+    num_valid = 0
+    for i_track, track in enumerate(tracks):
+        if not track['valid']:
+            num_invalid_old += 1
+            continue
+
+        p_inA = result.optimized_values[f'track_{i_track}_p_inA']
+        track['p_inA'] = p_inA
+        valid = track['valid']
+        for match in track['matches']:
+            view_id = match['view_id']
+            feature_id = match['feature_id']
+            view = views[view_id]
+            R_inB_ofA = view['R_inB_ofA']
+            p_inB_ofA = view['p_inB_ofA']
+            p_inB = R_inB_ofA @ p_inA + p_inB_ofA
+            b = views[view_id]['pts'][feature_id]['pt2d']
+            e = projection_error(K, R_inB_ofA, p_inB_ofA, p_inA, b)
+
+            # Remain valid if depth is positive
+            valid = valid and p_inB[2] > 0.
+
+            # Remain valid if reprojection error is below threshold
+            valid = valid and e < max_reprojection_err
+
+        track['valid'] = valid
+        if valid:
+            num_valid += 1
+        else:
+            num_invalid_new += 1
+
+    # Show diagnostics
+    print(f'{num_views:6d} views with updated pose estimate')
+    print(f'{num_valid:6d} valid tracks with updated position estimate')
+    print(f'{num_invalid_old:6d} already invalid tracks')
+    print(f'{num_invalid_new:6d} newly invalid tracks')
+
 def store_results(views, tracks, K, result, max_reprojection_err=1.):
     """
     Updates views and tracks given the result from optimization.
@@ -1166,7 +1422,11 @@ def store_results(views, tracks, K, result, max_reprojection_err=1.):
             R_inB_ofA = view['R_inB_ofA']
             p_inB_ofA = view['p_inB_ofA']
             p_inB = R_inB_ofA @ p_inA + p_inB_ofA
-            b = views[view_id]['pts'][feature_id]['pt2d']
+
+            desc = str(track['matches'][view_id]['feature_id'])
+            index = int(np.where(np.array(views[track["matches"][view_id]["view_id"]]["desc"]) == desc)[0][0])
+
+            b = views[view_id]['pts'][index]['pt2d']
             e = projection_error(K, R_inB_ofA, p_inB_ofA, p_inA, b)
             
             # Remain valid if depth is positive
@@ -1310,6 +1570,10 @@ def copy_results(views, tracks):
     # Insert references to tracks into views
     for track in tracks_copy:
         for match in track['matches']:
+
+            #desc = str(track['matches'][view_id]['feature_id'])
+            #index = int(np.where(np.array(views[track["matches"][view_id]["view_id"]]["desc"]) == desc)[0][0])
+
             pt = views_copy[match['view_id']]['pts'][match['feature_id']]
             if pt['track'] is None:
                 pt['track'] = track
