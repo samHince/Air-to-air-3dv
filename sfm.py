@@ -234,7 +234,6 @@ def getUSV(alpha, beta):
 """
 Functions for resectioning and triangulation.
 """
-
 def resection(p_inA, c, K, rng, threshold, num_iters=1000): # Sam's version #
     """
     INPUTS
@@ -308,6 +307,78 @@ def resection(p_inA, c, K, rng, threshold, num_iters=1000): # Sam's version #
             p_inC_ofA = p_inC_ofA_i
 
     return R_inC_ofA, p_inC_ofA, num_inliers, mask
+
+def resectionCole(p_inA, c, K, rng, threshold=1., num_iters=1000):
+    """
+    INPUTS
+    -- required --
+    p_inA is n x 3
+    c is n x 2
+    K is 3 x 3
+    rng is a random number generator
+    -- optional --
+    threshold is the max error (e.g., reprojection) for inliers
+    num_iters is the number of RANSAC iterations
+    OUTPUTS
+    R_inC_ofA is 3 x 3
+    p_inC_ofA is length 3
+    num_inliers is a scalar
+    mask is length n (truthy value for each match that is an inlier, falsy otherwise)
+    """
+    inliers = 0 # Initialize variable
+    # For each of the desired number of iterations take a sample of 8 points and evaluate with associated inliers and outliers
+    for i in range(num_iters):
+        subset = np.random.randint(len(p_inA), size = 8)    # Generate 8 random numbers for indexes to sample
+        p_inA_sub = p_inA[subset, :]                        # Get the 8 random p_inA
+        c_sub = c[subset, :]                                # Get the 8 random c values
+        c_norm = np.hstack((c_sub, np.ones((c_sub.shape[0], 1))))
+        gamma = np.transpose(np.linalg.inv(K) @ np.transpose(c_norm))
+        centroid = np.mean(gamma[:,0:2], 0)
+        dist = np.mean(np.linalg.norm((gamma[:,0:2] - centroid), axis = 1))
+        T_2D = np.linalg.inv(np.array([[dist/np.sqrt(2), 0, centroid[0]],
+                                        [0, dist/np.sqrt(2), centroid[1]],
+                                        [0, 0, 1]]))
+        gamma_norm = np.transpose(T_2D @ np.transpose(gamma))
+        centroid = np.mean(p_inA_sub, 0)
+        dist = np.mean(np.linalg.norm((p_inA_sub - centroid), axis = 1))
+        T_3D = np.linalg.inv(np.array([[dist/np.sqrt(3), 0, 0, centroid[0]],
+                                        [0, dist/np.sqrt(3), 0, centroid[1]],
+                                        [0, 0, dist/np.sqrt(3), centroid[2]],
+                                        [0, 0, 0, 1]]))
+        p_inA_add = np.hstack((p_inA_sub, np.ones((p_inA_sub.shape[0], 1))))
+        p_inA_norm = np.transpose(T_3D @ np.transpose(p_inA_add))[:, 0:3]
+        k_prod_M = np.vstack([np.kron(p_inA_norm_i, skew(gamma_norm_i)) for p_inA_norm_i, gamma_norm_i in zip(p_inA_norm, gamma_norm)])
+        gamma_norm_skew = np.vstack([skew(gamma_norm_i) for p_inA_norm_i, gamma_norm_i in zip(p_inA_norm, gamma_norm)])
+        M = np.hstack([k_prod_M, gamma_norm_skew])
+        U, S, V_T = np.linalg.svd(M)
+        P_norm = np.array(np.column_stack((V_T[-1][0:3], V_T[-1][3:6], V_T[-1][6:9], V_T[-1][9:12])))
+        # print(np.shape(np.linalg.inv(T_2D)))
+        # print(np.shape(P_norm))
+        # print(np.shape(T_3D))
+        P = np.linalg.inv(T_2D) @ P_norm @ T_3D
+        # myprint(P)
+        R_inC_ofA_sub = P[:, 0:3]
+        # myprint(R_inC_ofA_sub)
+        # print(np.shape(R_inC_ofA_sub))
+        p_inC_ofA_sub = P[:, 3]
+        x_inC_ofA = R_inC_ofA_sub[:,0]
+        R_inC_ofA_sub = R_inC_ofA_sub/np.linalg.norm(x_inC_ofA)
+        p_inC_ofA_sub = p_inC_ofA_sub/np.linalg.norm(x_inC_ofA)
+        R_inC_ofA_sub = R_inC_ofA_sub * np.linalg.det(R_inC_ofA_sub)
+        p_inC_ofA_sub = p_inC_ofA_sub * np.linalg.det(R_inC_ofA_sub)
+        U, S, V_T = np.linalg.svd(R_inC_ofA_sub)
+        R_inC_ofA_sub = np.linalg.det(U @ V_T) * (U @ V_T)
+        mask_sub = projection_error(K, R_inC_ofA_sub, p_inC_ofA_sub, p_inA, c, warn=False) < threshold
+        inliers_sub = np.sum(mask_sub)
+        if inliers_sub > inliers:
+            R_inC_ofA = R_inC_ofA_sub
+            p_inC_ofA = p_inC_ofA_sub
+            mask = mask_sub
+            inliers = inliers_sub
+        else:
+            continue
+
+    return R_inC_ofA, p_inC_ofA, inliers, mask
 
 def triangulate(track, views, K): # Sam's version #
     """
